@@ -7,7 +7,7 @@
 #include <fastpm/libfastpm.h>
 #include <fastpm/logging.h>
 #include <fastpm/string.h>
-#include <fastpm/fof.h>
+#include <fastpm/rfof.h>
 #include <fastpm/io.h>
 
 int main(int argc, char * argv[]) {
@@ -22,12 +22,11 @@ int main(int argc, char * argv[]) {
 
     FastPMConfig * config = & (FastPMConfig) {
         .nc = 64,
-        .boxsize = 64. * 0.3,
+        .boxsize = 0.3 * 64,
         .alloc_factor = 10.0,
         .cosmology = NULL,
         .vpminit = (VPMInit[]) {
-            {.a_start = 0, .pm_nc_factor = 1},
-            {.a_start = 0.0001, .pm_nc_factor = 2},
+            {.a_start = 0, .pm_nc_factor = 2},
             {.a_start = -1, .pm_nc_factor = 0},
         },
         .FORCE_TYPE = FASTPM_FORCE_FASTPM,
@@ -37,9 +36,9 @@ int main(int argc, char * argv[]) {
     FastPMSolver solver[1];
     fastpm_solver_init(solver, config, comm);
 
-    FastPMFloat * rho_init_ktruth = pm_alloc(solver->pm);
-    FastPMFloat * rho_final_ktruth = pm_alloc(solver->pm);
-    FastPMFloat * rho_final_xtruth = pm_alloc(solver->pm);
+    FastPMFloat * rho_init_ktruth = pm_alloc(solver->basepm);
+    FastPMFloat * rho_final_ktruth = pm_alloc(solver->basepm);
+    FastPMFloat * rho_final_xtruth = pm_alloc(solver->basepm);
 
     /* First establish the truth by 2lpt -- this will be replaced with PM. */
     struct fastpm_powerspec_eh_params eh = {
@@ -48,39 +47,40 @@ int main(int argc, char * argv[]) {
         .omegam = 0.260,
         .omegab = 0.044,
     };
-    fastpm_ic_fill_gaussiank(solver->pm, rho_init_ktruth, 2004, FASTPM_DELTAK_GADGET);
-    fastpm_ic_induce_correlation(solver->pm, rho_init_ktruth, (fastpm_fkfunc)fastpm_utils_powerspec_eh, &eh);
+    fastpm_ic_fill_gaussiank(solver->basepm, rho_init_ktruth, 2004, FASTPM_DELTAK_GADGET);
+    fastpm_ic_induce_correlation(solver->basepm, rho_init_ktruth, (fastpm_fkfunc)fastpm_utils_powerspec_eh, &eh);
 
     double time_step[] = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
-    fastpm_solver_setup_lpt(solver, FASTPM_SPECIES_CDM, rho_init_ktruth, NULL, 0.1);
+    fastpm_solver_setup_lpt(solver, FASTPM_SPECIES_CDM, rho_init_ktruth, 0.1);
 
     fastpm_solver_evolve(solver, time_step, sizeof(time_step) / sizeof(time_step[0]));
 
 
-    double linkinglength = 0.2 * 0.3;
-    FastPMFOFFinder fof = {
+    // Parameters fitted for Illustris under 0.3 Mpc/h particle sep, 40 steps.
+    // l1 = 0.25, A1 = 0.012, l6=0.24, A2=0.06, B1=7.02, B2=6.025.
+    FastPMRFOFFinder rfof = {
         .nmin = 8,
-        .kdtree_thresh = 8,
+        .kdtree_thresh = 1,
+        .linkinglength = 0.2 * 0.3,
+        .l1 = 0.2 * 0.3, //0.25 * 0.3,
+        .l6 = 0.2 * 0.3, 0.24 * 0.3,
+        .A1 = 0, // 0.012 * 0.3,
+        .A2 = 0, //0.06 * 0.3,
+        .B1 = 1000, // 7.02,
+        .B2 = 0, // 6.025,
         .periodic = 1,
     };
 
     FastPMStore * p = fastpm_solver_get_species(solver, FASTPM_SPECIES_CDM);
-    fastpm_fof_init(&fof, linkinglength, p, solver->basepm);
+    fastpm_rfof_init(&rfof, solver->cosmology, p, solver->basepm);
 
     FastPMStore halos[1];
-    FastPMStore halos_sub[1];
-    fastpm_store_set_name(halos, "FOFHalos");
-    fastpm_fof_execute(&fof, linkinglength, halos, NULL, NULL);
-    fastpm_store_fill_subsample_mask(p, 0.1, p->mask, solver->comm);
-    fastpm_fof_execute(&fof, linkinglength, halos_sub, NULL, p->mask);
+    fastpm_store_set_name(halos, "RFOFHalos");
+    fastpm_rfof_execute(&rfof, halos, NULL, 0.0);
 
-    char * snapshot = fastpm_strdup_printf("fof-%d", solver->NTask);
+    char * snapshot = fastpm_strdup_printf("rfof-%d", solver->NTask);
     fastpm_sort_snapshot(halos, solver->comm, FastPMSnapshotSortByLength, 0);
     fastpm_store_write(halos, snapshot, "w", 1, solver->comm);
-
-    char * snapshot_sub = fastpm_strdup_printf("fof-sub-%d", solver->NTask);
-    fastpm_sort_snapshot(halos_sub, solver->comm, FastPMSnapshotSortByLength, 0);
-    fastpm_store_write(halos_sub, snapshot_sub, "w", 1, solver->comm);
 
     int task;
     int ntask;
@@ -96,13 +96,12 @@ int main(int argc, char * argv[]) {
         }
     }
 
-    fastpm_store_destroy(halos_sub);
     fastpm_store_destroy(halos);
-    fastpm_fof_destroy(&fof);
+    fastpm_rfof_destroy(&rfof);
 
-    pm_free(solver->pm, rho_final_xtruth);
-    pm_free(solver->pm, rho_final_ktruth);
-    pm_free(solver->pm, rho_init_ktruth);
+    pm_free(solver->basepm, rho_final_xtruth);
+    pm_free(solver->basepm, rho_final_ktruth);
+    pm_free(solver->basepm, rho_init_ktruth);
 
     fastpm_solver_destroy(solver);
     libfastpm_cleanup();

@@ -1153,8 +1153,6 @@ run_fof(FastPMSolver * fastpm, FastPMStore * snapshot, FastPMStore * halos, RunD
     CLOCK(fof);
 
     FastPMFOFFinder fof = {
-        /* convert from fraction of mean separation to simulation distance units. */
-        .linkinglength = CONF(prr->lua, fof_linkinglength) * CONF(prr->lua, boxsize) / CONF(prr->lua, nc),
         .periodic = 1,
         .nmin = CONF(prr->lua, fof_nmin),
         .kdtree_thresh = CONF(prr->lua, fof_kdtree_thresh),
@@ -1164,10 +1162,12 @@ run_fof(FastPMSolver * fastpm, FastPMStore * snapshot, FastPMStore * halos, RunD
     fastpm_store_set_name(halos, dataset);
     free(dataset);
 
-    fastpm_fof_init(&fof, snapshot, fastpm->pm);
+    /* convert from fraction of mean separation to simulation distance units. */
+    double linkinglength = CONF(prr->lua, fof_linkinglength) * CONF(prr->lua, boxsize) / CONF(prr->lua, nc);
+    fastpm_fof_init(&fof, linkinglength, snapshot, fastpm->pm);
 
     ENTER(fof);
-    fastpm_fof_execute(&fof, halos);
+    fastpm_fof_execute(&fof, linkinglength, halos, NULL, NULL);
     LEAVE(fof);
 
     fastpm_fof_destroy(&fof);
@@ -1175,14 +1175,15 @@ run_fof(FastPMSolver * fastpm, FastPMStore * snapshot, FastPMStore * halos, RunD
 
 static void
 _halos_ready (FastPMFOFFinder * finder,
-    FastPMHaloEvent * event, void ** userdata)
+    FastPMStore * halos,
+    FastPMStore * p,
+    ptrdiff_t * ihalo,
+    void ** userdata)
 {
     double rmin = *((double*) userdata[0]);
     double halosize = *((double*) userdata[1]);
     FastPMLightCone * lc = (FastPMLightCone*) userdata[2];
     FastPMParticleMaskType * keep_for_tail = (FastPMParticleMaskType *) userdata[3];
-    FastPMStore * halos = event->halos;
-    FastPMStore * p = event->p;
 
     ptrdiff_t i;
 
@@ -1204,7 +1205,7 @@ _halos_ready (FastPMFOFFinder * finder,
     }
 
     for(i = 0; i < p->np; i ++) {
-        ptrdiff_t hid = event->ihalo[i];
+        ptrdiff_t hid = ihalo[i];
         double r_p = fastpm_lc_distance(lc, p->x[i]);
         if (r_p > rmin + halosize) {
             /* not near the tail of the lightcone, do not keep for tail */
@@ -1260,33 +1261,31 @@ run_usmesh_fof(FastPMSolver * fastpm,
     ENTER(fof);
 
     FastPMFOFFinder fof = {
-        /* convert from fraction of mean separation to simulation distance units. */
-        .linkinglength = CONF(prr->lua, fof_linkinglength) * CONF(prr->lua, boxsize) / CONF(prr->lua, nc),
         .periodic = 0,
         .nmin = CONF(prr->lua, fof_nmin),
         .kdtree_thresh = CONF(prr->lua, fof_kdtree_thresh),
     };
 
-    fastpm_fof_init(&fof, p, fastpm->pm);
+    /* convert from fraction of mean separation to simulation distance units. */
+    double linkinglength = CONF(prr->lua, fof_linkinglength) * CONF(prr->lua, boxsize) / CONF(prr->lua, nc);
+    fastpm_fof_init(&fof, linkinglength, p, fastpm->pm);
 
     double rmin = lc->speedfactor * HorizonDistance(lcevent->af, lc->horizon);
-
+    /* FIXME: clean this up! halos_ready is converted from an event handler. */
     void * userdata[5];
     userdata[0] = & rmin;
     userdata[1] = & maxhalosize;
     userdata[2] = lc;
     userdata[3] = keep_for_tail;
 
-    fastpm_add_event_handler(&fof.event_handlers,
-        FASTPM_EVENT_HALO,
-        FASTPM_EVENT_STAGE_AFTER,
-        (FastPMEventHandlerFunction) _halos_ready,
-        userdata);
-
+    ptrdiff_t * ihalo;
     ENTER(fof);
-    fastpm_fof_execute(&fof, halos);
+    fastpm_fof_execute(&fof, linkinglength, halos, &ihalo, NULL);
     LEAVE(fof);
 
+    _halos_ready(&fof, halos, p, ihalo, userdata);
+
+    fastpm_store_subsample(halos, halos->mask, halos);
     fastpm_fof_destroy(&fof);
 
     uint64_t ntail = 0;

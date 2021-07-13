@@ -79,8 +79,8 @@ main(int argc, char * argv[])
         fastpm_raise(-1, "Must supply a snapshot file name and a linking length\n");
     }
     char * filebase = cli->argv[0];
-    double linkinglength = atof(cli->argv[1]);
-    char * dataset = fastpm_strdup_printf("LL-%05.3f", linkinglength);
+    double b = atof(cli->argv[1]);
+    char * dataset = fastpm_strdup_printf("LL-%05.3f", b);
 
     fastpm_info("Running FOF on %s; writing to %s\n", filebase, dataset);
     LUAParameters * lua = read_lua_parameters_mpi(filebase, &error, comm);
@@ -108,26 +108,27 @@ main(int argc, char * argv[])
 
     fastpm_store_write(source, filebase, "r", cli->Nwriters, comm);
 
+    /* convert from fraction of mean separation to simulation distance units. */
+    double linkinglength = b * CONF(lua, boxsize) / CONF(lua, nc);
+
     CLOCK(fof);
     CLOCK(io);
     CLOCK(sort);
     ENTER(fof);
     FastPMFOFFinder fof = {
-        /* convert from fraction of mean separation to simulation distance units. */
-        .linkinglength = linkinglength * CONF(lua, boxsize) / CONF(lua, nc),
         .periodic = 1,
         .nmin = CONF(lua, fof_nmin),
         .kdtree_thresh = CONF(lua, fof_kdtree_thresh),
     };
 
-    fastpm_fof_init(&fof, source, basepm);
+    fastpm_fof_init(&fof, linkinglength, source, basepm);
 
     FastPMStore halos[1];
 
     ENTER(fof);
 
     fastpm_store_set_name(halos, dataset);
-    fastpm_fof_execute(&fof, halos);
+    fastpm_fof_execute(&fof, linkinglength, halos, NULL, NULL);
 
     LEAVE(fof);
 
